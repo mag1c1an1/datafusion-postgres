@@ -23,6 +23,7 @@ pub(crate) struct PgDatabaseTable<C> {
     catalog_list: C,
     oid_counter: Arc<AtomicU32>,
     oid_cache: Arc<RwLock<HashMap<OidCacheKey, Oid>>>,
+    include_synthetic_postgres_database: bool,
 }
 
 impl<C: CatalogInfo> PgDatabaseTable<C> {
@@ -30,6 +31,7 @@ impl<C: CatalogInfo> PgDatabaseTable<C> {
         catalog_list: C,
         oid_counter: Arc<AtomicU32>,
         oid_cache: Arc<RwLock<HashMap<OidCacheKey, Oid>>>,
+        include_synthetic_postgres_database: bool,
     ) -> Self {
         // Define the schema for pg_database
         // This matches PostgreSQL's pg_database table columns
@@ -62,6 +64,7 @@ impl<C: CatalogInfo> PgDatabaseTable<C> {
             catalog_list,
             oid_counter,
             oid_cache,
+            include_synthetic_postgres_database,
         }
     }
 
@@ -116,10 +119,9 @@ impl<C: CatalogInfo> PgDatabaseTable<C> {
             datacls.push(None); // No specific ACLs
         }
 
-        // Always include a "postgres" database entry if not already present
-        // (This is for compatibility with tools that expect it)
+        // Optionally include a `postgres` database for clients that expect it.
         let default_datname = "postgres".to_string();
-        if !datnames.contains(&default_datname) {
+        if this.include_synthetic_postgres_database && !datnames.contains(&default_datname) {
             let cache_key = OidCacheKey::Catalog(default_datname.clone());
             let catalog_oid = resolve_oid(&cache_key, &oid_cache, &this.oid_counter);
             catalog_oid_cache.insert(cache_key, catalog_oid);

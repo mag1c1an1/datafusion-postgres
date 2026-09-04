@@ -206,6 +206,24 @@ pub(crate) enum OidCacheKey {
 /// client can't join a system object back to its namespace (e.g. DBeaver
 /// resolving a column's data type). See #390.
 const PG_CATALOG_NAMESPACE_OID: Oid = 11;
+/// Configures optional PostgreSQL compatibility relations.
+///
+/// The defaults preserve the behavior expected by existing DataFusion
+/// PostgreSQL clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PgCatalogOptions {
+    /// Whether `pg_database` synthesizes a `postgres` database when the
+    /// catalog list does not contain one.
+    pub include_synthetic_postgres_database: bool,
+}
+
+impl Default for PgCatalogOptions {
+    fn default() -> Self {
+        Self {
+            include_synthetic_postgres_database: true,
+        }
+    }
+}
 
 /// Returns the fixed canonical OID for a catalog object, if it has one.
 ///
@@ -261,6 +279,7 @@ pub struct PgCatalogSchemaProvider<C, P> {
     oid_cache: Arc<RwLock<HashMap<OidCacheKey, Oid>>>,
     static_tables: Arc<PgCatalogStaticTables>,
     context_provider: P,
+    options: PgCatalogOptions,
 }
 
 #[async_trait]
@@ -289,12 +308,27 @@ impl<C: CatalogInfo, P: PgCatalogContextProvider> PgCatalogSchemaProvider<C, P> 
         static_tables: Arc<PgCatalogStaticTables>,
         context_provider: P,
     ) -> Result<PgCatalogSchemaProvider<C, P>> {
+        Self::try_new_with_options(
+            catalog_list,
+            static_tables,
+            context_provider,
+            PgCatalogOptions::default(),
+        )
+    }
+
+    pub fn try_new_with_options(
+        catalog_list: C,
+        static_tables: Arc<PgCatalogStaticTables>,
+        context_provider: P,
+        options: PgCatalogOptions,
+    ) -> Result<PgCatalogSchemaProvider<C, P>> {
         Ok(Self {
             catalog_list,
             oid_counter: Arc::new(AtomicU32::new(16384)),
             oid_cache: Arc::new(RwLock::new(HashMap::new())),
             static_tables,
             context_provider,
+            options,
         })
     }
 
@@ -447,6 +481,7 @@ impl<C: CatalogInfo, P: PgCatalogContextProvider> PgCatalogSchemaProvider<C, P> 
                     self.catalog_list.clone(),
                     self.oid_counter.clone(),
                     self.oid_cache.clone(),
+                    self.options.include_synthetic_postgres_database,
                 ));
                 Ok(Some(PgCatalogTable::Dynamic(table)))
             }
@@ -1481,7 +1516,7 @@ pub fn create_pg_get_partition_ancestors_udf() -> ScalarUDF {
     )
 }
 
-/// Install pg_catalog and postgres UDFs to current `SessionContext`
+/// Installs `pg_catalog` and PostgreSQL UDFs using the default compatibility options.
 pub fn setup_pg_catalog<P>(
     session_context: &SessionContext,
     catalog_name: &str,
@@ -1490,11 +1525,30 @@ pub fn setup_pg_catalog<P>(
 where
     P: PgCatalogContextProvider,
 {
+    setup_pg_catalog_with_options(
+        session_context,
+        catalog_name,
+        context_provider,
+        PgCatalogOptions::default(),
+    )
+}
+
+/// Installs `pg_catalog` and PostgreSQL UDFs using explicit compatibility options.
+pub fn setup_pg_catalog_with_options<P>(
+    session_context: &SessionContext,
+    catalog_name: &str,
+    context_provider: P,
+    options: PgCatalogOptions,
+) -> Result<(), Box<DataFusionError>>
+where
+    P: PgCatalogContextProvider,
+{
     let static_tables = Arc::new(PgCatalogStaticTables::try_new()?);
-    let pg_catalog = Arc::new(PgCatalogSchemaProvider::try_new(
+    let pg_catalog = Arc::new(PgCatalogSchemaProvider::try_new_with_options(
         session_context.state().catalog_list().clone(),
         static_tables.clone(),
         context_provider,
+        options,
     )?);
     session_context
         .catalog(catalog_name)
@@ -1577,6 +1631,40 @@ where
 mod test {
     use super::*;
 
+    #[tokio::test]
+    async fn pg_database_can_omit_the_synthetic_postgres_database() {
+        use crate::pg_catalog::context::EmptyContextProvider;
+        use datafusion::arrow::array::Int64Array;
+        use datafusion::prelude::{SessionConfig, SessionContext};
+
+        let config = SessionConfig::new().with_default_catalog_and_schema("lakesoul", "default");
+        let ctx = SessionContext::new_with_config(config);
+        setup_pg_catalog_with_options(
+            &ctx,
+            "lakesoul",
+            EmptyContextProvider,
+            PgCatalogOptions {
+                include_synthetic_postgres_database: false,
+            },
+        )
+        .unwrap();
+
+        let batches = ctx
+            .sql("SELECT count(*) FROM pg_catalog.pg_database WHERE datname = 'postgres'")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let postgres_count = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("count(*) returns an Int64 column")
+            .value(0);
+
+        assert_eq!(postgres_count, 0);
+    }
     #[tokio::test]
     async fn current_database_returns_the_configured_catalog_name() {
         use crate::pg_catalog::context::EmptyContextProvider;
