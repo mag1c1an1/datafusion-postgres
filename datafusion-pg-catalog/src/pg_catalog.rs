@@ -1,6 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, LazyLock};
 
 use async_trait::async_trait;
 use datafusion::arrow::array::{
@@ -1110,6 +1110,25 @@ impl PgCatalogStaticTables {
         Ok(tables)
     }
 
+    /// The process-wide decoded tables.
+    ///
+    /// The tables are immutable and identical for every session, so they are
+    /// decoded once and every [`setup_pg_catalog`] call shares them instead of
+    /// holding its own copy (several MB per session). The embedded data is
+    /// fixed at compile time, so a decode failure is permanent and cached.
+    pub fn shared() -> Result<Arc<Self>> {
+        static SHARED: LazyLock<std::result::Result<Arc<PgCatalogStaticTables>, String>> =
+            LazyLock::new(|| {
+                PgCatalogStaticTables::try_new()
+                    .map(Arc::new)
+                    .map_err(|e| e.to_string())
+            });
+        SHARED
+            .as_ref()
+            .map(Arc::clone)
+            .map_err(|e| DataFusionError::Internal(format!("pg_catalog static tables: {e}")))
+    }
+
     /// Create table from dumped arrow data
     fn create_arrow_table(data_bytes: Vec<u8>) -> Result<Arc<ArrowTable>> {
         ArrowTable::from_ipc_data(data_bytes).map(Arc::new)
@@ -1554,7 +1573,7 @@ pub fn setup_pg_catalog_with_options<P>(
 where
     P: PgCatalogContextProvider,
 {
-    let static_tables = Arc::new(PgCatalogStaticTables::try_new()?);
+    let static_tables = PgCatalogStaticTables::shared()?;
     let pg_catalog = Arc::new(PgCatalogSchemaProvider::try_new_with_options(
         session_context.state().catalog_list().clone(),
         static_tables.clone(),
@@ -1641,6 +1660,49 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[tokio::test]
+    async fn sessions_share_the_decoded_static_tables() {
+        use crate::pg_catalog::context::EmptyContextProvider;
+        use datafusion::datasource::MemTable;
+        use datafusion::prelude::{SessionConfig, SessionContext};
+
+        async fn pg_proc_values(ctx: &SessionContext) -> *const u8 {
+            let provider = ctx
+                .catalog("lakesoul")
+                .and_then(|catalog| catalog.schema("pg_catalog"))
+                .expect("pg_catalog schema")
+                .table("pg_proc")
+                .await
+                .unwrap()
+                .expect("pg_proc");
+            let table = (provider.as_ref() as &dyn std::any::Any)
+                .downcast_ref::<MemTable>()
+                .expect("pg_proc is a memory table");
+            let partition = table.batches[0].read().await;
+            partition[0].column(0).to_data().buffers()[0].as_ptr()
+        }
+
+        let mut contexts = Vec::new();
+        for _ in 0..2 {
+            let config =
+                SessionConfig::new().with_default_catalog_and_schema("lakesoul", "default");
+            let ctx = SessionContext::new_with_config(config);
+            setup_pg_catalog_with_options(
+                &ctx,
+                "lakesoul",
+                EmptyContextProvider,
+                PgCatalogOptions::default(),
+            )
+            .expect("setup");
+            contexts.push(ctx);
+        }
+        // Both sessions read the same decoded buffers rather than a copy each.
+        assert_eq!(
+            pg_proc_values(&contexts[0]).await,
+            pg_proc_values(&contexts[1]).await
+        );
+    }
 
     #[tokio::test]
     async fn pg_database_can_omit_the_synthetic_postgres_database() {
