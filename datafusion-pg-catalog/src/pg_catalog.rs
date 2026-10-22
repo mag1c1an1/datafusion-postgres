@@ -1574,8 +1574,9 @@ where
     P: PgCatalogContextProvider,
 {
     let static_tables = PgCatalogStaticTables::shared()?;
+    // `pg_catalog` becomes a schema inside this list, so it must not own it.
     let pg_catalog = Arc::new(PgCatalogSchemaProvider::try_new_with_options(
-        session_context.state().catalog_list().clone(),
+        Arc::downgrade(session_context.state().catalog_list()),
         static_tables.clone(),
         context_provider,
         options,
@@ -1702,6 +1703,27 @@ mod test {
             pg_proc_values(&contexts[0]).await,
             pg_proc_values(&contexts[1]).await
         );
+    }
+
+    #[tokio::test]
+    async fn dropping_the_session_frees_its_catalog_list() {
+        use crate::pg_catalog::context::EmptyContextProvider;
+        use datafusion::prelude::{SessionConfig, SessionContext};
+
+        let config = SessionConfig::new().with_default_catalog_and_schema("lakesoul", "default");
+        let ctx = SessionContext::new_with_config(config);
+        setup_pg_catalog(&ctx, "lakesoul", EmptyContextProvider).expect("setup");
+        // Scanning pg_class walks the catalog list through pg_catalog.
+        ctx.sql("SELECT count(*) FROM pg_catalog.pg_class")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let catalog_list = Arc::downgrade(ctx.state().catalog_list());
+
+        drop(ctx);
+        assert_eq!(catalog_list.strong_count(), 0);
     }
 
     #[tokio::test]

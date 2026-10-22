@@ -1,5 +1,5 @@
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use datafusion::{
@@ -95,6 +95,59 @@ impl CatalogInfo for Arc<dyn CatalogProviderList> {
             Ok(None)
         }
     }
+}
+
+/// A catalog list that `pg_catalog` reaches without owning it.
+///
+/// `pg_catalog` is registered as a schema of a catalog in the very list it
+/// describes, so a strong reference would make the list keep itself alive.
+/// Lookups fail once every owner of the list (the session) is gone.
+#[async_trait]
+impl CatalogInfo for Weak<dyn CatalogProviderList> {
+    async fn catalog_names(&self) -> Result<Vec<String>, DataFusionError> {
+        CatalogInfo::catalog_names(&upgrade(self)?).await
+    }
+
+    async fn schema_names(
+        &self,
+        catalog_name: &str,
+    ) -> Result<Option<Vec<String>>, DataFusionError> {
+        CatalogInfo::schema_names(&upgrade(self)?, catalog_name).await
+    }
+
+    async fn table_names(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+    ) -> Result<Option<Vec<String>>, DataFusionError> {
+        CatalogInfo::table_names(&upgrade(self)?, catalog_name, schema_name).await
+    }
+
+    async fn table_schema(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<Option<SchemaRef>, DataFusionError> {
+        CatalogInfo::table_schema(&upgrade(self)?, catalog_name, schema_name, table_name).await
+    }
+
+    async fn table_type(
+        &self,
+        catalog_name: &str,
+        schema_name: &str,
+        table_name: &str,
+    ) -> Result<Option<TableType>, DataFusionError> {
+        CatalogInfo::table_type(&upgrade(self)?, catalog_name, schema_name, table_name).await
+    }
+}
+
+fn upgrade(
+    list: &Weak<dyn CatalogProviderList>,
+) -> Result<Arc<dyn CatalogProviderList>, DataFusionError> {
+    list.upgrade().ok_or_else(|| {
+        DataFusionError::Execution("pg_catalog: the session's catalog list was dropped".to_string())
+    })
 }
 
 pub fn table_type_to_string(tt: &TableType) -> String {
