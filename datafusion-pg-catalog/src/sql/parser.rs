@@ -13,7 +13,6 @@ use super::rules::CurrentUserVariableToSessionUserFunctionCall;
 use super::rules::FixArrayLiteral;
 use super::rules::FixVersionColumnName;
 use super::rules::PrependUnqualifiedPgTableName;
-use super::rules::RemoveSubqueryFromProjection;
 use super::rules::ResolveUnqualifiedIdentifier;
 use super::rules::RewriteArrayAnyAllOperation;
 use super::rules::RewritePgCatalogOperator;
@@ -322,11 +321,10 @@ impl PostgresCompatibilityParser {
             Arc::new(CurrentUserVariableToSessionUserFunctionCall),
             Arc::new(StripCollate),
             Arc::new(RewritePgCatalogOperator),
-            // Resolve forward oid-alias casts (`'x'::regclass`, ...) to oid
-            // values BEFORE RemoveSubqueryFromProjection runs, so the
-            // emitted scalar subqueries it produces get its LIMIT 1 stamp.
             Arc::new(RewriteRegCastToSubquery::new()),
-            Arc::new(RemoveSubqueryFromProjection),
+            // Leave projection scalar subqueries to DataFusion's planner,
+            // including correlation and parameters. ScalarSubqueryExec checks
+            // uncorrelated cardinality; rewriting to LIMIT 1/NULL loses it.
             Arc::new(FixVersionColumnName),
         ];
 
