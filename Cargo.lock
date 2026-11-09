@@ -1752,6 +1752,7 @@ dependencies = [
  "rust_decimal",
  "rustls-pemfile",
  "rustls-pki-types",
+ "socket2",
  "tokio",
  "tokio-rustls",
 ]
