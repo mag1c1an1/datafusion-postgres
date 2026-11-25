@@ -35,10 +35,9 @@ use super::rules::StripCollate;
 ///   tokens are compared, so formatting differences (indentation, newlines,
 ///   spacing) do not matter.
 /// * **Substring match:** patterns are scanned at *every* token position, so a
-///   pattern matches as a contiguous sub-sequence of the input. Most entries
-///   are whole statements and therefore only match at a statement boundary;
-///   the grafana entry below is intentionally a *partial* replacement (it
-///   substitutes just an inner subquery).
+///   pattern matches as a contiguous sub-sequence of the input. Most
+///   patterns match whole statements; entries that replace only a fragment
+///   are documented individually below.
 /// * **`$N` placeholders are wildcards:** a `Token::Placeholder` in the pattern
 ///   (e.g. `$1`) matches any single non-`;` token in the input, so the psql
 ///   `\d` entries match regardless of whether the client binds a parameter or
@@ -122,6 +121,40 @@ const BLACKLIST_SQL_MAPPING: &[(&str, &str)] = &[
                                       AND n.nspname <> 'information_schema'
                                 ORDER BY 1, 2;",
 "SELECT NULL::TEXT AS schema_name, NULL::TEXT AS type_name WHERE false"
+    ),
+
+    // psql \d <table> -- column defaults and collations
+    //
+    // DataFusion cannot prove these correlated scalar subqueries return at most
+    // one row. The catalog keys are unique: (adrelid, adnum) in pg_attrdef and
+    // oid in pg_type and pg_collation. LEFT JOINs preserve both the attribute
+    // row and the NULLs for absent defaults and collations. Replace only the
+    // prefix so the original WHERE clause (including the relation OID) survives.
+    (
+"SELECT a.attname,
+        pg_catalog.format_type(a.atttypid, a.atttypmod),
+        (SELECT pg_catalog.pg_get_expr(d.adbin, d.adrelid, true)
+         FROM pg_catalog.pg_attrdef d
+         WHERE d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef),
+        a.attnotnull,
+        (SELECT c.collname FROM pg_catalog.pg_collation c, pg_catalog.pg_type t
+         WHERE c.oid = a.attcollation AND t.oid = a.atttypid AND a.attcollation <> t.typcollation) AS attcollation,
+        a.attidentity,
+        a.attgenerated
+      FROM pg_catalog.pg_attribute a
+      WHERE",
+"SELECT a.attname,
+        pg_catalog.format_type(a.atttypid, a.atttypmod),
+        CASE WHEN d.adrelid IS NOT NULL THEN pg_catalog.pg_get_expr(d.adbin, d.adrelid, true) END AS pg_get_expr,
+        a.attnotnull,
+        c.collname AS attcollation,
+        a.attidentity,
+        a.attgenerated
+      FROM pg_catalog.pg_attribute a
+      LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum AND a.atthasdef
+      LEFT JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+      LEFT JOIN pg_catalog.pg_collation c ON c.oid = a.attcollation AND a.attcollation <> t.typcollation
+      WHERE"
     ),
 
     // psql \d <table> -- row policies (polrelid bound via the $1 wildcard)
@@ -244,10 +277,9 @@ const BLACKLIST_SQL_MAPPING: &[(&str, &str)] = &[
 "SELECT\n   NULL::INT AS oid,\n   NULL::INT AS total_rel_size,\n   NULL::INT AS rel_size\n WHERE false"
     ),
 
-    // grafana -- search_path membership lookup. NOTE: this is the only entry
-    // that is a *partial* replacement -- it matches just the inner subquery and
-    // substitutes the empty string `''`, so the surrounding `IN (...)` simply
-    // matches nothing and the query returns zero rows.
+    // grafana -- search_path membership lookup. Replace just the inner
+    // subquery with the empty string `''`; the surrounding `IN (...)`
+    // then matches nothing and the query returns zero rows.
     //
     // Blocked by: missing `current_setting()` UDF -- the query resolves the
     //   session `search_path` at runtime via `current_setting('search_path')`.
@@ -322,9 +354,8 @@ impl PostgresCompatibilityParser {
             Arc::new(StripCollate),
             Arc::new(RewritePgCatalogOperator),
             Arc::new(RewriteRegCastToSubquery::new()),
-            // Leave projection scalar subqueries to DataFusion's planner,
-            // including correlation and parameters. ScalarSubqueryExec checks
-            // uncorrelated cardinality; rewriting to LIMIT 1/NULL loses it.
+            // Keep general scalar subqueries intact: rewriting them to
+            // LIMIT 1 or NULL loses their cardinality semantics.
             Arc::new(FixVersionColumnName),
         ];
 
