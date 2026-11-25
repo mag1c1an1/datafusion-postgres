@@ -15,7 +15,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use datafusion::arrow::datatypes::DataType;
 use datafusion::execution::FunctionRegistry;
 use datafusion::execution::session_state::SessionStateBuilder;
@@ -186,59 +185,62 @@ fn coerce_vector_operand(expr: Expr) -> Expr {
 #[derive(Debug)]
 pub struct PgVectorInsertHook;
 
-#[async_trait]
 impl QueryHook for PgVectorInsertHook {
-    async fn handle_simple_query(
-        &self,
-        statement: &Statement,
-        session_context: &SessionContext,
-        client: &mut dyn HookClient,
-    ) -> Option<PgWireResult<Response>> {
-        let mut statement = statement.clone();
-        if !rewrite_insert(session_context, &mut statement).await {
-            return None;
-        }
+    fn handle_simple_query<'a>(
+        &'a self,
+        statement: &'a Statement,
+        session_context: &'a SessionContext,
+        client: &'a mut dyn HookClient,
+    ) -> futures::future::BoxFuture<'a, Option<PgWireResult<Response>>> {
+        Box::pin(async move {
+            let mut statement = statement.clone();
+            if !rewrite_insert(session_context, &mut statement).await {
+                return None;
+            }
 
-        let query = statement.to_string();
-        let result = async {
-            let df = crate::client::execute_statement(client, session_context, &query).await?;
-            crate::handlers::map_rows_affected_for_insert(&df).await
-        }
-        .await;
+            let query = statement.to_string();
+            let result = async {
+                let df = crate::client::execute_statement(client, session_context, &query).await?;
+                crate::handlers::map_rows_affected_for_insert(&df).await
+            }
+            .await;
 
-        Some(result)
+            Some(result)
+        })
     }
 
-    async fn handle_extended_parse_query(
-        &self,
-        sql: &Statement,
-        session_context: &SessionContext,
-        _client: &(dyn ClientInfo + Send + Sync),
-    ) -> Option<PgWireResult<LogicalPlan>> {
-        let mut statement = sql.clone();
-        if !rewrite_insert(session_context, &mut statement).await {
-            return None;
-        }
+    fn handle_extended_parse_query<'a>(
+        &'a self,
+        sql: &'a Statement,
+        session_context: &'a SessionContext,
+        _client: &'a (dyn ClientInfo + Send + Sync),
+    ) -> futures::future::BoxFuture<'a, Option<PgWireResult<LogicalPlan>>> {
+        Box::pin(async move {
+            let mut statement = sql.clone();
+            if !rewrite_insert(session_context, &mut statement).await {
+                return None;
+            }
 
-        let state = session_context.state();
-        let plan = state
-            .statement_to_plan(datafusion::sql::parser::Statement::Statement(Box::new(
-                statement,
-            )))
-            .await
-            .map_err(|e| PgWireError::ApiError(Box::new(e)));
-        Some(plan)
+            let state = session_context.state();
+            let plan = state
+                .statement_to_plan(datafusion::sql::parser::Statement::Statement(Box::new(
+                    statement,
+                )))
+                .await
+                .map_err(|e| PgWireError::ApiError(Box::new(e)));
+            Some(plan)
+        })
     }
 
-    async fn handle_extended_query(
-        &self,
-        _statement: &Statement,
-        _logical_plan: &LogicalPlan,
-        _params: &datafusion::common::ParamValues,
-        _session_context: &SessionContext,
-        _client: &mut dyn HookClient,
-    ) -> Option<PgWireResult<Response>> {
-        None
+    fn handle_extended_query<'a>(
+        &'a self,
+        _statement: &'a Statement,
+        _logical_plan: &'a LogicalPlan,
+        _params: &'a datafusion::common::ParamValues,
+        _session_context: &'a SessionContext,
+        _client: &'a mut dyn HookClient,
+    ) -> futures::future::BoxFuture<'a, Option<PgWireResult<Response>>> {
+        Box::pin(async move { None })
     }
 }
 

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use datafusion::arrow::datatypes::{DataType, Field, Schema};
 use datafusion::common::{ParamValues, ToDFSchema};
 use datafusion::error::DataFusionError;
@@ -24,87 +23,92 @@ use crate::hooks::HookClient;
 #[derive(Debug)]
 pub struct SetShowHook;
 
-#[async_trait]
 impl QueryHook for SetShowHook {
     /// called in simple query handler to return response directly
-    async fn handle_simple_query(
-        &self,
-        statement: &Statement,
-        session_context: &SessionContext,
-        client: &mut dyn HookClient,
-    ) -> Option<PgWireResult<Response>> {
-        match statement {
-            Statement::Set { .. } => {
-                try_respond_set_statements(client, statement, session_context).await
+    fn handle_simple_query<'a>(
+        &'a self,
+        statement: &'a Statement,
+        session_context: &'a SessionContext,
+        client: &'a mut dyn HookClient,
+    ) -> futures::future::BoxFuture<'a, Option<PgWireResult<Response>>> {
+        Box::pin(async move {
+            match statement {
+                Statement::Set { .. } => {
+                    try_respond_set_statements(client, statement, session_context).await
+                }
+                Statement::ShowVariable { .. }
+                | Statement::ShowStatus { .. }
+                | Statement::ShowCatalogs { .. } => {
+                    try_respond_show_statements(client, statement, session_context).await
+                }
+                _ => None,
             }
-            Statement::ShowVariable { .. }
-            | Statement::ShowStatus { .. }
-            | Statement::ShowCatalogs { .. } => {
-                try_respond_show_statements(client, statement, session_context).await
-            }
-            _ => None,
-        }
+        })
     }
 
-    async fn handle_extended_parse_query(
-        &self,
-        stmt: &Statement,
-        _session_context: &SessionContext,
-        _client: &(dyn ClientInfo + Send + Sync),
-    ) -> Option<PgWireResult<LogicalPlan>> {
-        match stmt {
-            Statement::Set { .. } => {
-                let show_schema = Arc::new(Schema::new(Vec::<Field>::new()));
-                let result = show_schema
-                    .to_dfschema()
-                    .map(|df_schema| {
-                        LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
-                            produce_one_row: true,
-                            schema: Arc::new(df_schema),
+    fn handle_extended_parse_query<'a>(
+        &'a self,
+        stmt: &'a Statement,
+        _session_context: &'a SessionContext,
+        _client: &'a (dyn ClientInfo + Send + Sync),
+    ) -> futures::future::BoxFuture<'a, Option<PgWireResult<LogicalPlan>>> {
+        Box::pin(async move {
+            match stmt {
+                Statement::Set { .. } => {
+                    let show_schema = Arc::new(Schema::new(Vec::<Field>::new()));
+                    let result = show_schema
+                        .to_dfschema()
+                        .map(|df_schema| {
+                            LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
+                                produce_one_row: true,
+                                schema: Arc::new(df_schema),
+                            })
                         })
-                    })
-                    .map_err(|e| PgWireError::ApiError(Box::new(e)));
-                Some(result)
-            }
-            Statement::ShowVariable { .. }
-            | Statement::ShowStatus { .. }
-            | Statement::ShowCatalogs { .. } => {
-                let show_schema =
-                    Arc::new(Schema::new(vec![Field::new("show", DataType::Utf8, false)]));
-                let result = show_schema
-                    .to_dfschema()
-                    .map(|df_schema| {
-                        LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
-                            produce_one_row: true,
-                            schema: Arc::new(df_schema),
+                        .map_err(|e| PgWireError::ApiError(Box::new(e)));
+                    Some(result)
+                }
+                Statement::ShowVariable { .. }
+                | Statement::ShowStatus { .. }
+                | Statement::ShowCatalogs { .. } => {
+                    let show_schema =
+                        Arc::new(Schema::new(vec![Field::new("show", DataType::Utf8, false)]));
+                    let result = show_schema
+                        .to_dfschema()
+                        .map(|df_schema| {
+                            LogicalPlan::EmptyRelation(datafusion::logical_expr::EmptyRelation {
+                                produce_one_row: true,
+                                schema: Arc::new(df_schema),
+                            })
                         })
-                    })
-                    .map_err(|e| PgWireError::ApiError(Box::new(e)));
-                Some(result)
+                        .map_err(|e| PgWireError::ApiError(Box::new(e)));
+                    Some(result)
+                }
+                _ => None,
             }
-            _ => None,
-        }
+        })
     }
 
-    async fn handle_extended_query(
-        &self,
-        statement: &Statement,
-        _logical_plan: &LogicalPlan,
-        _params: &ParamValues,
-        session_context: &SessionContext,
-        client: &mut dyn HookClient,
-    ) -> Option<PgWireResult<Response>> {
-        match statement {
-            Statement::Set { .. } => {
-                try_respond_set_statements(client, statement, session_context).await
+    fn handle_extended_query<'a>(
+        &'a self,
+        statement: &'a Statement,
+        _logical_plan: &'a LogicalPlan,
+        _params: &'a ParamValues,
+        session_context: &'a SessionContext,
+        client: &'a mut dyn HookClient,
+    ) -> futures::future::BoxFuture<'a, Option<PgWireResult<Response>>> {
+        Box::pin(async move {
+            match statement {
+                Statement::Set { .. } => {
+                    try_respond_set_statements(client, statement, session_context).await
+                }
+                Statement::ShowVariable { .. }
+                | Statement::ShowStatus { .. }
+                | Statement::ShowCatalogs { .. } => {
+                    try_respond_show_statements(client, statement, session_context).await
+                }
+                _ => None,
             }
-            Statement::ShowVariable { .. }
-            | Statement::ShowStatus { .. }
-            | Statement::ShowCatalogs { .. } => {
-                try_respond_show_statements(client, statement, session_context).await
-            }
-            _ => None,
-        }
+        })
     }
 }
 

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use datafusion::common::ParamValues;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::SessionContext;
@@ -92,53 +91,56 @@ impl PermissionsHook {
     }
 }
 
-#[async_trait]
 impl QueryHook for PermissionsHook {
     /// called in simple query handler to return response directly
-    async fn handle_simple_query(
-        &self,
-        statement: &Statement,
-        _session_context: &SessionContext,
-        client: &mut dyn HookClient,
-    ) -> Option<PgWireResult<Response>> {
-        if Self::should_skip_permission_check(statement) {
-            return None;
-        }
+    fn handle_simple_query<'a>(
+        &'a self,
+        statement: &'a Statement,
+        _session_context: &'a SessionContext,
+        client: &'a mut dyn HookClient,
+    ) -> futures::future::BoxFuture<'a, Option<PgWireResult<Response>>> {
+        Box::pin(async move {
+            if Self::should_skip_permission_check(statement) {
+                return None;
+            }
 
-        // Check permissions for other statements
-        if let Err(e) = self.check_statement_permission(&*client, statement).await {
-            return Some(Err(e));
-        }
+            // Check permissions for other statements
+            if let Err(e) = self.check_statement_permission(&*client, statement).await {
+                return Some(Err(e));
+            }
 
-        None
+            None
+        })
     }
 
-    async fn handle_extended_parse_query(
-        &self,
-        _stmt: &Statement,
-        _session_context: &SessionContext,
-        _client: &(dyn ClientInfo + Send + Sync),
-    ) -> Option<PgWireResult<LogicalPlan>> {
-        None
+    fn handle_extended_parse_query<'a>(
+        &'a self,
+        _stmt: &'a Statement,
+        _session_context: &'a SessionContext,
+        _client: &'a (dyn ClientInfo + Send + Sync),
+    ) -> futures::future::BoxFuture<'a, Option<PgWireResult<LogicalPlan>>> {
+        Box::pin(async move { None })
     }
 
-    async fn handle_extended_query(
-        &self,
-        statement: &Statement,
-        _logical_plan: &LogicalPlan,
-        _params: &ParamValues,
-        _session_context: &SessionContext,
-        client: &mut dyn HookClient,
-    ) -> Option<PgWireResult<Response>> {
-        if Self::should_skip_permission_check(statement) {
-            return None;
-        }
+    fn handle_extended_query<'a>(
+        &'a self,
+        statement: &'a Statement,
+        _logical_plan: &'a LogicalPlan,
+        _params: &'a ParamValues,
+        _session_context: &'a SessionContext,
+        client: &'a mut dyn HookClient,
+    ) -> futures::future::BoxFuture<'a, Option<PgWireResult<Response>>> {
+        Box::pin(async move {
+            if Self::should_skip_permission_check(statement) {
+                return None;
+            }
 
-        // Check permissions for other statements
-        if let Err(e) = self.check_statement_permission(&*client, statement).await {
-            return Some(Err(e));
-        }
+            // Check permissions for other statements
+            if let Err(e) = self.check_statement_permission(&*client, statement).await {
+                return Some(Err(e));
+            }
 
-        None
+            None
+        })
     }
 }

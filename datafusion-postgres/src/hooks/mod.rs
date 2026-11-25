@@ -10,6 +10,7 @@ use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::SessionContext;
 use datafusion::sql::sqlparser::ast::Statement;
 use futures::Sink;
+use futures::future::BoxFuture;
 use pgwire::api::ClientInfo;
 use pgwire::api::ClientPortalStore;
 use pgwire::api::results::Response;
@@ -46,31 +47,38 @@ where
     }
 }
 
-#[async_trait]
+/// A statement hook run before the default handling.
+///
+/// The methods return boxed futures rather than using `#[async_trait]`, which
+/// adds `'life0: 'async_trait`-style bounds to every method. Each impl then has
+/// its own parameter environment, and rustc cannot reuse the proof that the
+/// captured `&SessionContext`/`&LogicalPlan` are `Send` across impls: every
+/// hook repeated a walk of about 1000 DataFusion types. With one late-bound
+/// lifetime and no where-clauses, the proof is shared by all impls.
 pub trait QueryHook: Send + Sync {
     /// called in simple query handler to return response directly
-    async fn handle_simple_query(
-        &self,
-        statement: &Statement,
-        session_context: &SessionContext,
-        client: &mut dyn HookClient,
-    ) -> Option<PgWireResult<Response>>;
+    fn handle_simple_query<'a>(
+        &'a self,
+        statement: &'a Statement,
+        session_context: &'a SessionContext,
+        client: &'a mut dyn HookClient,
+    ) -> BoxFuture<'a, Option<PgWireResult<Response>>>;
 
     /// called at extended query parse phase, for generating `LogicalPlan`from statement
-    async fn handle_extended_parse_query(
-        &self,
-        sql: &Statement,
-        session_context: &SessionContext,
-        client: &(dyn ClientInfo + Send + Sync),
-    ) -> Option<PgWireResult<LogicalPlan>>;
+    fn handle_extended_parse_query<'a>(
+        &'a self,
+        sql: &'a Statement,
+        session_context: &'a SessionContext,
+        client: &'a (dyn ClientInfo + Send + Sync),
+    ) -> BoxFuture<'a, Option<PgWireResult<LogicalPlan>>>;
 
     /// called at extended query execute phase, for query execution
-    async fn handle_extended_query(
-        &self,
-        statement: &Statement,
-        logical_plan: &LogicalPlan,
-        params: &ParamValues,
-        session_context: &SessionContext,
-        client: &mut dyn HookClient,
-    ) -> Option<PgWireResult<Response>>;
+    fn handle_extended_query<'a>(
+        &'a self,
+        statement: &'a Statement,
+        logical_plan: &'a LogicalPlan,
+        params: &'a ParamValues,
+        session_context: &'a SessionContext,
+        client: &'a mut dyn HookClient,
+    ) -> BoxFuture<'a, Option<PgWireResult<Response>>>;
 }

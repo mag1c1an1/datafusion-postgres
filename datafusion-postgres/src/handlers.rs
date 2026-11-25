@@ -103,12 +103,51 @@ impl ErrorHandler for LoggingErrorHandler {
     }
 }
 
+/// Implements `Send` and `Sync` by hand for a struct whose fields are all
+/// `Send + Sync`, checked once here.
+///
+/// This is for downstream compile time. The pgwire handler traits require
+/// `Self: Send + Sync`, so a downstream handler generic over the pgwire client
+/// that calls into these types proves their auto traits in its own parameter
+/// environment, where rustc cannot reuse earlier results. Derived structurally,
+/// that proof walks `SessionContext` -> `SessionState` -> `LogicalPlan` ->
+/// `Expr` (about 1000 types) once per such method. A hand-written impl makes it
+/// a single impl lookup.
+///
+/// The check destructures the struct exhaustively, so a new field that is not
+/// listed fails to compile, and requires each field to be `Send + Sync`, which
+/// is stronger than what the auto traits need.
+macro_rules! send_sync_by_fields {
+    ($ty:ident { $($field:ident),* $(,)? }) => {
+        // SAFETY: every field is `Send + Sync`, checked below; the exhaustive
+        // pattern keeps the list complete.
+        unsafe impl Send for $ty {}
+        // SAFETY: as above.
+        unsafe impl Sync for $ty {}
+
+        const _: () = {
+            fn assert_send_sync<T: Send + Sync + ?Sized>(_: &T) {}
+            #[allow(dead_code)]
+            fn check(value: &$ty) {
+                let $ty { $($field),* } = value;
+                $(assert_send_sync($field);)*
+            }
+        };
+    };
+}
+
 /// The pgwire handler backed by a datafusion `SessionContext`
 pub struct DfSessionService {
     session_context: Arc<SessionContext>,
     parser: Arc<Parser>,
     query_hooks: Vec<Arc<dyn QueryHook>>,
 }
+
+send_sync_by_fields!(DfSessionService {
+    session_context,
+    parser,
+    query_hooks,
+});
 
 impl DfSessionService {
     pub fn new(session_context: Arc<SessionContext>) -> DfSessionService {
@@ -380,6 +419,12 @@ pub struct Parser {
     query_hooks: Vec<Arc<dyn QueryHook>>,
 }
 
+send_sync_by_fields!(Parser {
+    session_context,
+    sql_parser,
+    query_hooks,
+});
+
 #[async_trait]
 impl QueryParser for Parser {
     type Statement = (String, Option<(sqlparser::ast::Statement, LogicalPlan)>);
@@ -493,39 +538,40 @@ mod tests {
 
     struct TestHook;
 
-    #[async_trait]
     impl QueryHook for TestHook {
-        async fn handle_simple_query(
-            &self,
-            statement: &sqlparser::ast::Statement,
-            _ctx: &SessionContext,
-            _client: &mut dyn HookClient,
-        ) -> Option<PgWireResult<Response>> {
-            if statement.to_string().contains("magic") {
-                Some(Ok(Response::EmptyQuery))
-            } else {
-                None
-            }
+        fn handle_simple_query<'a>(
+            &'a self,
+            statement: &'a sqlparser::ast::Statement,
+            _ctx: &'a SessionContext,
+            _client: &'a mut dyn HookClient,
+        ) -> futures::future::BoxFuture<'a, Option<PgWireResult<Response>>> {
+            Box::pin(async move {
+                if statement.to_string().contains("magic") {
+                    Some(Ok(Response::EmptyQuery))
+                } else {
+                    None
+                }
+            })
         }
 
-        async fn handle_extended_parse_query(
-            &self,
-            _statement: &sqlparser::ast::Statement,
-            _session_context: &SessionContext,
-            _client: &(dyn ClientInfo + Send + Sync),
-        ) -> Option<PgWireResult<LogicalPlan>> {
-            None
+        fn handle_extended_parse_query<'a>(
+            &'a self,
+            _statement: &'a sqlparser::ast::Statement,
+            _session_context: &'a SessionContext,
+            _client: &'a (dyn ClientInfo + Send + Sync),
+        ) -> futures::future::BoxFuture<'a, Option<PgWireResult<LogicalPlan>>> {
+            Box::pin(async move { None })
         }
 
-        async fn handle_extended_query(
-            &self,
-            _statement: &sqlparser::ast::Statement,
-            _logical_plan: &LogicalPlan,
-            _params: &ParamValues,
-            _session_context: &SessionContext,
-            _client: &mut dyn HookClient,
-        ) -> Option<PgWireResult<Response>> {
-            None
+        fn handle_extended_query<'a>(
+            &'a self,
+            _statement: &'a sqlparser::ast::Statement,
+            _logical_plan: &'a LogicalPlan,
+            _params: &'a ParamValues,
+            _session_context: &'a SessionContext,
+            _client: &'a mut dyn HookClient,
+        ) -> futures::future::BoxFuture<'a, Option<PgWireResult<Response>>> {
+            Box::pin(async move { None })
         }
     }
 

@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use datafusion::common::ParamValues;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::SessionContext;
@@ -22,67 +21,72 @@ pub(crate) type DfStatement = (String, Option<(sqlparser::ast::Statement, Logica
 #[derive(Debug)]
 pub struct CursorStatementHook;
 
-#[async_trait]
 impl QueryHook for CursorStatementHook {
-    async fn handle_simple_query(
-        &self,
-        statement: &sqlparser::ast::Statement,
-        session_context: &SessionContext,
-        client: &mut dyn HookClient,
-    ) -> Option<PgWireResult<Response>> {
-        let store = client.portal_store();
+    fn handle_simple_query<'a>(
+        &'a self,
+        statement: &'a sqlparser::ast::Statement,
+        session_context: &'a SessionContext,
+        client: &'a mut dyn HookClient,
+    ) -> futures::future::BoxFuture<'a, Option<PgWireResult<Response>>> {
+        Box::pin(async move {
+            let store = client.portal_store();
 
-        match statement {
-            sqlparser::ast::Statement::Declare { stmts } => {
-                Some(handle_declare(store, stmts, session_context).await)
+            match statement {
+                sqlparser::ast::Statement::Declare { stmts } => {
+                    Some(handle_declare(store, stmts, session_context).await)
+                }
+                sqlparser::ast::Statement::Fetch {
+                    name, direction, ..
+                } => Some(handle_fetch(store, name, direction).await),
+                sqlparser::ast::Statement::Close { cursor } => Some(handle_close(store, cursor)),
+                _ => None,
             }
-            sqlparser::ast::Statement::Fetch {
-                name, direction, ..
-            } => Some(handle_fetch(store, name, direction).await),
-            sqlparser::ast::Statement::Close { cursor } => Some(handle_close(store, cursor)),
-            _ => None,
-        }
+        })
     }
 
-    async fn handle_extended_parse_query(
-        &self,
-        statement: &sqlparser::ast::Statement,
-        _session_context: &SessionContext,
-        _client: &(dyn ClientInfo + Send + Sync),
-    ) -> Option<PgWireResult<LogicalPlan>> {
-        match statement {
-            sqlparser::ast::Statement::Declare { .. }
-            | sqlparser::ast::Statement::Fetch { .. }
-            | sqlparser::ast::Statement::Close { .. } => Some(Ok(LogicalPlan::EmptyRelation(
-                datafusion::logical_expr::EmptyRelation {
-                    produce_one_row: false,
-                    schema: Arc::new(datafusion::common::DFSchema::empty()),
-                },
-            ))),
-            _ => None,
-        }
+    fn handle_extended_parse_query<'a>(
+        &'a self,
+        statement: &'a sqlparser::ast::Statement,
+        _session_context: &'a SessionContext,
+        _client: &'a (dyn ClientInfo + Send + Sync),
+    ) -> futures::future::BoxFuture<'a, Option<PgWireResult<LogicalPlan>>> {
+        Box::pin(async move {
+            match statement {
+                sqlparser::ast::Statement::Declare { .. }
+                | sqlparser::ast::Statement::Fetch { .. }
+                | sqlparser::ast::Statement::Close { .. } => Some(Ok(LogicalPlan::EmptyRelation(
+                    datafusion::logical_expr::EmptyRelation {
+                        produce_one_row: false,
+                        schema: Arc::new(datafusion::common::DFSchema::empty()),
+                    },
+                ))),
+                _ => None,
+            }
+        })
     }
 
-    async fn handle_extended_query(
-        &self,
-        statement: &sqlparser::ast::Statement,
-        _logical_plan: &LogicalPlan,
-        _params: &ParamValues,
-        session_context: &SessionContext,
-        client: &mut dyn HookClient,
-    ) -> Option<PgWireResult<Response>> {
-        let store = client.portal_store();
+    fn handle_extended_query<'a>(
+        &'a self,
+        statement: &'a sqlparser::ast::Statement,
+        _logical_plan: &'a LogicalPlan,
+        _params: &'a ParamValues,
+        session_context: &'a SessionContext,
+        client: &'a mut dyn HookClient,
+    ) -> futures::future::BoxFuture<'a, Option<PgWireResult<Response>>> {
+        Box::pin(async move {
+            let store = client.portal_store();
 
-        match statement {
-            sqlparser::ast::Statement::Declare { stmts } => {
-                Some(handle_declare(store, stmts, session_context).await)
+            match statement {
+                sqlparser::ast::Statement::Declare { stmts } => {
+                    Some(handle_declare(store, stmts, session_context).await)
+                }
+                sqlparser::ast::Statement::Fetch {
+                    name, direction, ..
+                } => Some(handle_fetch(store, name, direction).await),
+                sqlparser::ast::Statement::Close { cursor } => Some(handle_close(store, cursor)),
+                _ => None,
             }
-            sqlparser::ast::Statement::Fetch {
-                name, direction, ..
-            } => Some(handle_fetch(store, name, direction).await),
-            sqlparser::ast::Statement::Close { cursor } => Some(handle_close(store, cursor)),
-            _ => None,
-        }
+        })
     }
 }
 

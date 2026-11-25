@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use datafusion::common::ParamValues;
 use datafusion::logical_expr::LogicalPlan;
 use datafusion::prelude::SessionContext;
@@ -20,73 +19,78 @@ use crate::hooks::HookClient;
 #[derive(Debug)]
 pub struct TransactionStatementHook;
 
-#[async_trait]
 impl QueryHook for TransactionStatementHook {
     /// called in simple query handler to return response directly
-    async fn handle_simple_query(
-        &self,
-        statement: &Statement,
-        _session_context: &SessionContext,
-        client: &mut dyn HookClient,
-    ) -> Option<PgWireResult<Response>> {
-        let resp = try_respond_transaction_statements(client, statement)
-            .await
-            .transpose();
+    fn handle_simple_query<'a>(
+        &'a self,
+        statement: &'a Statement,
+        _session_context: &'a SessionContext,
+        client: &'a mut dyn HookClient,
+    ) -> futures::future::BoxFuture<'a, Option<PgWireResult<Response>>> {
+        Box::pin(async move {
+            let resp = try_respond_transaction_statements(client, statement)
+                .await
+                .transpose();
 
-        if let Some(result) = resp {
-            return Some(result);
-        }
+            if let Some(result) = resp {
+                return Some(result);
+            }
 
-        // Check if we're in a failed transaction and block non-transaction
-        // commands
-        if client.transaction_status() == TransactionStatus::Error {
-            return Some(Err(PgWireError::UserError(Box::new(
+            // Check if we're in a failed transaction and block non-transaction
+            // commands
+            if client.transaction_status() == TransactionStatus::Error {
+                return Some(Err(PgWireError::UserError(Box::new(
                 pgwire::error::ErrorInfo::new(
                     "ERROR".to_string(),
                     "25P01".to_string(),
                     "current transaction is aborted, commands ignored until end of transaction block".to_string(),
                 ),
             ))));
-        }
+            }
 
-        None
+            None
+        })
     }
 
-    async fn handle_extended_parse_query(
-        &self,
-        stmt: &Statement,
-        _session_context: &SessionContext,
-        _client: &(dyn ClientInfo + Send + Sync),
-    ) -> Option<PgWireResult<LogicalPlan>> {
-        // We don't generate logical plan for these statements
-        if matches!(
-            stmt,
-            Statement::StartTransaction { .. }
-                | Statement::Commit { .. }
-                | Statement::Rollback { .. }
-        ) {
-            // Return a dummy plan for transaction commands - they'll be handled by transaction handler
-            let dummy_schema = datafusion::common::DFSchema::empty();
-            return Some(Ok(LogicalPlan::EmptyRelation(
-                datafusion::logical_expr::EmptyRelation {
-                    produce_one_row: false,
-                    schema: Arc::new(dummy_schema),
-                },
-            )));
-        }
-        None
+    fn handle_extended_parse_query<'a>(
+        &'a self,
+        stmt: &'a Statement,
+        _session_context: &'a SessionContext,
+        _client: &'a (dyn ClientInfo + Send + Sync),
+    ) -> futures::future::BoxFuture<'a, Option<PgWireResult<LogicalPlan>>> {
+        Box::pin(async move {
+            // We don't generate logical plan for these statements
+            if matches!(
+                stmt,
+                Statement::StartTransaction { .. }
+                    | Statement::Commit { .. }
+                    | Statement::Rollback { .. }
+            ) {
+                // Return a dummy plan for transaction commands - they'll be handled by transaction handler
+                let dummy_schema = datafusion::common::DFSchema::empty();
+                return Some(Ok(LogicalPlan::EmptyRelation(
+                    datafusion::logical_expr::EmptyRelation {
+                        produce_one_row: false,
+                        schema: Arc::new(dummy_schema),
+                    },
+                )));
+            }
+            None
+        })
     }
 
-    async fn handle_extended_query(
-        &self,
-        statement: &Statement,
-        _logical_plan: &LogicalPlan,
-        _params: &ParamValues,
-        session_context: &SessionContext,
-        client: &mut dyn HookClient,
-    ) -> Option<PgWireResult<Response>> {
-        self.handle_simple_query(statement, session_context, client)
-            .await
+    fn handle_extended_query<'a>(
+        &'a self,
+        statement: &'a Statement,
+        _logical_plan: &'a LogicalPlan,
+        _params: &'a ParamValues,
+        session_context: &'a SessionContext,
+        client: &'a mut dyn HookClient,
+    ) -> futures::future::BoxFuture<'a, Option<PgWireResult<Response>>> {
+        Box::pin(async move {
+            self.handle_simple_query(statement, session_context, client)
+                .await
+        })
     }
 }
 
